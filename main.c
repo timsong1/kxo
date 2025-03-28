@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 #include <linux/workqueue.h>
 
 #include "game.h"
@@ -79,6 +80,8 @@ static struct cdev kxo_cdev;
 
 static char draw_buffer[DRAWBUFFER_SIZE];
 
+static char table[N_GRIDS];
+
 /* Data are stored into a kfifo buffer before passing them to the userspace */
 static DECLARE_KFIFO_PTR(rx_fifo, unsigned char);
 
@@ -94,9 +97,12 @@ static DECLARE_WAIT_QUEUE_HEAD(rx_wait);
 /* Insert the whole chess board into the kfifo buffer */
 static void produce_board(void)
 {
-    unsigned int len = kfifo_in(&rx_fifo, draw_buffer, sizeof(draw_buffer));
-    if (unlikely(len < sizeof(draw_buffer)) && printk_ratelimit())
-        pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(draw_buffer) - len);
+    // unsigned int len = kfifo_in(&rx_fifo, draw_buffer, sizeof(draw_buffer));
+    // if (unlikely(len < sizeof(draw_buffer)) && printk_ratelimit())
+    // pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(draw_buffer) - len);
+    unsigned int len = kfifo_in(&rx_fifo, table, sizeof(table));
+    if (unlikely(len < sizeof(table)) && printk_ratelimit())
+        pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(table) - len);
 
     pr_debug("kxo: %s: in %u/%u bytes\n", __func__, len, kfifo_len(&rx_fifo));
 }
@@ -114,7 +120,7 @@ static DEFINE_MUTEX(consumer_lock);
  */
 static struct circ_buf fast_buf;
 
-static char table[N_GRIDS];
+
 
 /* Draw the board into draw_buffer */
 static int draw_board(char *table)
@@ -150,10 +156,14 @@ static void fast_buf_clear(void)
     fast_buf.head = fast_buf.tail = 0;
 }
 
+static s64 total_time_ns = 0;
+static unsigned long count = 0;
 /* Workqueue handler: executed by a kernel thread */
 static void drawboard_work_func(struct work_struct *w)
 {
     int cpu;
+    ktime_t tv_start, tv_end;
+    s64 nsecs;
 
     /* This code runs from a kernel thread, so softirqs and hard-irqs must
      * be enabled.
@@ -165,8 +175,10 @@ static void drawboard_work_func(struct work_struct *w)
      * during the pr_info().
      */
     cpu = get_cpu();
-    pr_info("kxo: [CPU#%d] %s\n", cpu, __func__);
+    pr_info("kxo: [CPU#%d] enter %s\n", cpu, __func__);
     put_cpu();
+
+    tv_start = ktime_get();
 
     read_lock(&attr_obj.lock);
     if (attr_obj.display == '0') {
@@ -175,15 +187,28 @@ static void drawboard_work_func(struct work_struct *w)
     }
     read_unlock(&attr_obj.lock);
 
-    mutex_lock(&producer_lock);
-    draw_board(table);
-    mutex_unlock(&producer_lock);
+    // mutex_lock(&producer_lock);
+    // draw_board(table);
+    // mutex_unlock(&producer_lock);
 
     /* Store data to the kfifo buffer */
     mutex_lock(&consumer_lock);
     produce_board();
     mutex_unlock(&consumer_lock);
 
+    tv_end = ktime_get();
+    nsecs = (s64) ktime_to_ns(ktime_sub(tv_end, tv_start));
+    pr_info("kxo: [CPU#%d] doing %s for %llu nsec\n", cpu, __func__,
+            (unsigned long long) nsecs);
+    if (count >= 20)
+        pr_info(
+            "kxo: [CPU#%d] average time for first 20 times doing %s is %llu "
+            "nsec\n",
+            cpu, __func__, (unsigned long long) (total_time_ns / count));
+    else {
+        total_time_ns += nsecs;
+        count++;
+    }
     wake_up_interruptible(&rx_wait);
 }
 
@@ -346,9 +371,9 @@ static void timer_handler(struct timer_list *__timer)
             pr_info("kxo: [CPU#%d] Drawing final board\n", cpu);
             put_cpu();
 
-            mutex_lock(&producer_lock);
-            draw_board(table);
-            mutex_unlock(&producer_lock);
+            // mutex_lock(&producer_lock);
+            // draw_board(table);
+            // mutex_unlock(&producer_lock);
 
             /* Store data to the kfifo buffer */
             mutex_lock(&consumer_lock);
