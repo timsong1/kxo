@@ -138,8 +138,9 @@ int main(int argc, char *argv[])
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 
-    struct itimerspec timer_spec = {.it_value.tv_sec = 1,
-                                    .it_interval.tv_sec = 1};
+    struct itimerspec timer_spec = {
+        .it_value = {.tv_sec = 0, .tv_nsec = 200000000},
+        .it_interval = {.tv_sec = 0, .tv_nsec = 200000000}};
 
     // char display_buf[DRAWBUFFER_SIZE];
     char table[N_GRIDS];
