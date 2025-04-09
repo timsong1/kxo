@@ -282,7 +282,6 @@ static void ai_two_work_func(struct work_struct *w)
             (unsigned long long) nsecs >> 10);
     put_cpu();
 }
-
 /* Workqueue for asynchronous bottom-half processing */
 static struct workqueue_struct *kxo_workqueue;
 

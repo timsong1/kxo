@@ -1,11 +1,14 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/timerfd.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "game.h"
@@ -13,6 +16,12 @@
 #define XO_STATUS_FILE "/sys/module/kxo/initstate"
 #define XO_DEVICE_FILE "/dev/kxo"
 #define XO_DEVICE_ATTR_FILE "/sys/class/kxo/kxo/kxo_state"
+
+#define handle_error(msg)   \
+    do {                    \
+        perror(msg);        \
+        exit(EXIT_FAILURE); \
+    } while (0)
 
 static bool status_check(void)
 {
@@ -108,6 +117,18 @@ static int draw_board(char *table)
 
     return 0;
 }
+static void print(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    const struct tm *t = localtime(&ts.tv_sec);
+
+    printf("\033[H\033[J"); /* ASCII escape code to clear the screen */
+    printf("%s\n", draw_buffer);
+    printf("%02d:%02d:%02d.%03d\n", t->tm_hour, t->tm_min, t->tm_sec,
+           (int) (ts.tv_nsec / 1000000));
+}
 int main(int argc, char *argv[])
 {
     if (!status_check())
@@ -117,18 +138,30 @@ int main(int argc, char *argv[])
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 
+    struct itimerspec timer_spec = {.it_value.tv_sec = 1,
+                                    .it_interval.tv_sec = 1};
+
     // char display_buf[DRAWBUFFER_SIZE];
     char table[N_GRIDS];
     fd_set readset;
     int device_fd = open(XO_DEVICE_FILE, O_RDONLY);
+    int timerfd = timerfd_create(CLOCK_REALTIME, 0);
     int max_fd = device_fd > STDIN_FILENO ? device_fd : STDIN_FILENO;
+    if (timerfd > max_fd)
+        max_fd = timerfd;
     read_attr = true;
     end_attr = false;
 
+    if (timerfd_settime(timerfd, TFD_TIMER_ABSTIME, &timer_spec, NULL) == -1) {
+        handle_error("timerfd_settime");
+    }
+
+    uint64_t exp;
     while (!end_attr) {
         FD_ZERO(&readset);
         FD_SET(STDIN_FILENO, &readset);
         FD_SET(device_fd, &readset);
+        FD_SET(timerfd, &readset);
 
         int result = select(max_fd + 1, &readset, NULL, NULL, NULL);
         if (result < 0) {
@@ -141,13 +174,22 @@ int main(int argc, char *argv[])
             listen_keyboard_handler();
         } else if (read_attr && FD_ISSET(device_fd, &readset)) {
             FD_CLR(device_fd, &readset);
-            printf("\033[H\033[J"); /* ASCII escape code to clear the screen */
-            // read(device_fd, display_buf, DRAWBUFFER_SIZE);
-            // draw_board(display_buf);
+            // printf("\033[H\033[J"); /* ASCII escape code to clear the screen
+            // */
+            //  read(device_fd, display_buf, DRAWBUFFER_SIZE);
+            //  draw_board(display_buf);
             read(device_fd, table, N_GRIDS);
             draw_board(table);
-            printf("%s", draw_buffer);
-            // printf("%s", display_buf);
+            print();
+            // printf("%s", draw_buffer);
+            //  printf("%s", display_buf);
+        } else if (FD_ISSET(timerfd, &readset)) {
+            ssize_t s = read(timerfd, &exp, sizeof(exp));
+            if (s != sizeof(uint64_t))
+                handle_error("read timer");
+            print();
+            printf("STDIN_FILENO: %d, devicefd: %d, timerfd: %d\n",
+                   STDIN_FILENO, device_fd, timerfd);
         }
     }
 
